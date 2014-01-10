@@ -13,10 +13,12 @@
 
 package org.sonatype.nexus.restlet1x.internal;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 import javax.inject.Singleton;
 
-import org.sonatype.nexus.plugins.rest.AbstractDocumentationNexusResourceBundle;
+import org.sonatype.nexus.plugin.support.DocumentationBundleSupport;
+import org.sonatype.nexus.restlet1x.Restlet1xPlugin;
 
 /**
  * @since 2.3
@@ -24,16 +26,15 @@ import org.sonatype.nexus.plugins.rest.AbstractDocumentationNexusResourceBundle;
 @Named
 @Singleton
 public class Restlet1xDocumentationResourceBundle
-    extends AbstractDocumentationNexusResourceBundle
+    extends DocumentationBundleSupport
 {
-  @Override
-  public String getPluginId() {
-    return "nexus-restlet1x-plugin";
+  @Inject
+  public Restlet1xDocumentationResourceBundle(final Restlet1xPlugin plugin) {
+    super(plugin);
   }
 
   @Override
   public String getDescription() {
     return "Nexus Core API (Restlet 1.x)";
   }
-
 }

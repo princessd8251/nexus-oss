@@ -16,7 +16,9 @@ package org.sonatype.nexus.testsuite.yum;
 import org.sonatype.nexus.client.core.subsystem.content.Location;
 import org.sonatype.nexus.client.core.subsystem.repository.Repository;
 import org.sonatype.nexus.client.core.subsystem.repository.maven.MavenProxyRepository;
+import org.sonatype.nexus.client.core.subsystem.routing.Routing;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.*;
@@ -37,6 +39,7 @@ public class YumProxyMetadataIT
     super(nexusBundleCoordinates);
   }
 
+  @Ignore // NEXUS-6184
   @Test
   public void cleanUp() throws Exception {
     final Repository hosted = createYumEnabledRepository(repositoryIdForTest());
@@ -47,6 +50,7 @@ public class YumProxyMetadataIT
         repositoryLocation(hosted.id(), "test/test-artifact/0.0.1/test-artifact-0.0.1.rpm"),
         testData().resolveFile("/rpms/test-artifact-1.2.3-1.noarch.rpm")
     );
+    client().getSubsystem(Routing.class).updatePrefixFile(proxy.id());
     waitForNexusToSettleDown();
 
     // verify proxy got it, and record the primary path
@@ -62,6 +66,7 @@ public class YumProxyMetadataIT
         repositoryLocation(hosted.id(), "test/othertest-artifact/0.0.1/othertest-artifact-0.0.1.rpm"),
         testData().resolveFile("/rpms/test-artifact-1.2.3-1.noarch.rpm")
     );
+    client().getSubsystem(Routing.class).updatePrefixFile(proxy.id());
     waitForNexusToSettleDown();
 
     // verify proxy got it, and old primary path is not existing anymore (as hash included in file name changed)

@@ -28,7 +28,6 @@ import org.sonatype.nexus.templates.NoSuchTemplateIdException;
 import org.sonatype.nexus.templates.TemplateManager;
 import org.sonatype.nexus.templates.TemplateSet;
 import org.sonatype.nexus.templates.repository.RepositoryTemplate;
-import org.sonatype.nexus.web.Constants;
 import org.sonatype.plexus.rest.ReferenceFactory;
 import org.sonatype.plexus.rest.resource.AbstractPlexusResource;
 import org.sonatype.plexus.rest.resource.PlexusResource;
@@ -47,16 +46,13 @@ public abstract class AbstractNexusPlexusResource
     extends AbstractPlexusResource
     implements PlexusResource
 {
-  @Deprecated
-  public static final String NEXUS_INSTANCE_LOCAL = "local";
-
   public static final String PASSWORD_PLACE_HOLDER = "|$|N|E|X|U|S|$|";
 
-  public static final String IS_LOCAL_PARAMETER = Constants.REQ_QP_IS_LOCAL_PARAMETER;
+  public static final String IS_LOCAL_PARAMETER = "isLocal";
 
-  public static final String IS_REMOTE_PARAMETER = Constants.REQ_QP_IS_REMOTE_PARAMETER;
+  public static final String IS_REMOTE_PARAMETER = "isRemote";
 
-  public static final String AS_EXPIRED_PARAMETER = Constants.REQ_QP_AS_EXPIRED_PARAMETER;
+  public static final String AS_EXPIRED_PARAMETER = "asExpired";
 
   private NexusConfiguration nexusConfiguration;
 

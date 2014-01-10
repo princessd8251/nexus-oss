@@ -27,6 +27,9 @@ import org.sonatype.nexus.bootstrap.monitor.commands.HaltCommand;
 import org.sonatype.nexus.bootstrap.monitor.commands.PingCommand;
 import org.sonatype.nexus.bootstrap.monitor.commands.StopApplicationCommand;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.slf4j.bridge.SLF4JBridgeHandler;
 
 import static org.sonatype.nexus.bootstrap.monitor.CommandMonitorThread.LOCALHOST;
@@ -43,6 +46,8 @@ public class Launcher
 {
   // FIXME: Move this to CommandMonitorThread
   public static final String COMMAND_MONITOR_PORT = CommandMonitorThread.class.getName() + ".port";
+
+  public static final String SYSTEM_USERID = "*SYSTEM";
 
   private static final String FIVE_SECONDS = "5000";
 
@@ -75,6 +80,27 @@ public class Launcher
     Map<String, String> props = builder.build();
     System.getProperties().putAll(props);
     ConfigurationHolder.set(props);
+
+    // log critical information about the runtime environment
+    Logger log = LoggerFactory.getLogger(Launcher.class);
+    log.info("Java: {}, {}, {}, {}",
+        System.getProperty("java.version"),
+        System.getProperty("java.vm.name"),
+        System.getProperty("java.vm.vendor"),
+        System.getProperty("java.vm.version")
+    );
+    log.info("OS: {}, {}, {}",
+        System.getProperty("os.name"),
+        System.getProperty("os.version"),
+        System.getProperty("os.arch")
+    );
+    log.info("User: {}, {}, {}",
+        System.getProperty("user.name"),
+        System.getProperty("user.language"),
+        System.getProperty("user.home")
+    );
+    log.info("CWD: {}", System.getProperty("user.dir"));
+    log.info("TMP: {}", System.getProperty("java.io.tmpdir"));
 
     if (args == null) {
       throw new NullPointerException();
@@ -147,6 +173,7 @@ public class Launcher
   }
 
   public static void main(final String[] args) throws Exception {
+    MDC.put("userId", SYSTEM_USERID);
     new Launcher(null, null, args).start();
   }
 }

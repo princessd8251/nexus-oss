@@ -52,6 +52,7 @@ import org.sonatype.nexus.proxy.storage.remote.RemoteStorageContext;
 import org.sonatype.nexus.proxy.storage.remote.http.QueryStringBuilder;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Stopwatch;
 import com.yammer.metrics.Metrics;
 import com.yammer.metrics.core.MetricsRegistry;
 import com.yammer.metrics.core.Timer;
@@ -90,7 +91,7 @@ public class HttpClientRemoteStorage
     implements RemoteRepositoryStorage
 {
 
-  private static final Logger outboundRequestLog = LoggerFactory.getLogger("remote.storage.outbound");
+  static final Logger outboundRequestLog = LoggerFactory.getLogger("remote.storage.outbound");
 
   // ----------------------------------------------------------------------
   // Constants
@@ -157,13 +158,23 @@ public class HttpClientRemoteStorage
     return PROVIDER_STRING;
   }
 
+  /**
+   * Key used in HttpGet method parameters in {@link #retrieveItem(ProxyRepository, ResourceStoreRequest, String)} method
+   * that this request is about content retrieval, hence, the special redirection strategy set up in
+   * {@link HttpClientManagerImpl#getProxyRepositoryRedirectStrategy(ProxyRepository, RemoteStorageContext)} should
+   * be applied. See that method for more.
+   *
+   * @since 2.7.0
+   */
+  public static final String CONTENT_RETRIEVAL_MARKER_KEY = HttpClientRemoteStorage.class.getName() + "#retrieveItem";
+
   @Override
   public AbstractStorageItem retrieveItem(final ProxyRepository repository, final ResourceStoreRequest request,
                                           final String baseUrl)
       throws ItemNotFoundException, RemoteStorageException
   {
     final URL remoteURL =
-        appendQueryString(getAbsoluteUrlFromBase(baseUrl, request.getRequestPath()), repository);
+        appendQueryString(repository, request, getAbsoluteUrlFromBase(baseUrl, request.getRequestPath()));
 
     final String url = remoteURL.toExternalForm();
     if (remoteURL.getPath().endsWith("/")) {
@@ -177,6 +188,7 @@ public class HttpClientRemoteStorage
     }
 
     final HttpGet method = new HttpGet(url);
+    method.getParams().setBooleanParameter(CONTENT_RETRIEVAL_MARKER_KEY, true);
 
     final HttpResponse httpResponse = executeRequest(repository, request, method, baseUrl);
 
@@ -247,7 +259,7 @@ public class HttpClientRemoteStorage
 
     final ResourceStoreRequest request = new ResourceStoreRequest(item);
 
-    final URL remoteUrl = appendQueryString(getAbsoluteUrlFromBase(repository, request), repository);
+    final URL remoteUrl = appendQueryString(repository, request, getAbsoluteUrlFromBase(repository, request));
 
     final HttpPut method = new HttpPut(remoteUrl.toExternalForm());
 
@@ -281,7 +293,7 @@ public class HttpClientRemoteStorage
   public void deleteItem(final ProxyRepository repository, final ResourceStoreRequest request)
       throws ItemNotFoundException, UnsupportedStorageOperationException, RemoteStorageException
   {
-    final URL remoteUrl = appendQueryString(getAbsoluteUrlFromBase(repository, request), repository);
+    final URL remoteUrl = appendQueryString(repository, request, getAbsoluteUrlFromBase(repository, request));
 
     final HttpDelete method = new HttpDelete(remoteUrl.toExternalForm());
 
@@ -302,7 +314,7 @@ public class HttpClientRemoteStorage
                                             final ResourceStoreRequest request, final boolean isStrict)
       throws RemoteStorageException
   {
-    final URL remoteUrl = appendQueryString(getAbsoluteUrlFromBase(repository, request), repository);
+    final URL remoteUrl = appendQueryString(repository, request, getAbsoluteUrlFromBase(repository, request));
 
     HttpRequestBase method;
     HttpResponse httpResponse = null;
@@ -368,9 +380,10 @@ public class HttpClientRemoteStorage
           final RemoteStorageContext ctx = getRemoteStorageContext(repository);
           final HttpClient httpClient = (HttpClient) ctx.getContextObject(CTX_KEY_CLIENT);
           final PageContext pageContext = new RepositoryPageContext(httpClient, repository);
+          final ResourceStoreRequest rmRequest = new ResourceStoreRequest("/.meta/repository-metadata.xml");
           final URL nxRepoMetadataUrl = appendQueryString(
-              getAbsoluteUrlFromBase(repository, new ResourceStoreRequest("/.meta/repository-metadata.xml")),
-              repository);
+              repository, rmRequest,
+              getAbsoluteUrlFromBase(repository, rmRequest));
           try {
             final Page page = Page.getPageFor(pageContext, nxRepoMetadataUrl.toExternalForm());
             if (page.getStatusCode() == 200) {
@@ -445,13 +458,17 @@ public class HttpClientRemoteStorage
   {
     final Timer timer = timer(repository, httpRequest, baseUrl);
     final TimerContext timerContext = timer.time();
+    Stopwatch stopwatch = null;
+    if (outboundRequestLog.isDebugEnabled()) {
+      stopwatch = new Stopwatch().start();
+    }
     try {
       return doExecuteRequest(repository, request, httpRequest);
     }
     finally {
       timerContext.stop();
-      if (outboundRequestLog.isDebugEnabled()) {
-        outboundRequestLog.debug("[{}] {} {}", repository.getId(), httpRequest.getMethod(), httpRequest.getURI());
+      if (stopwatch != null) {
+        outboundRequestLog.debug("[{}] {} {} - {}", repository.getId(), httpRequest.getMethod(), httpRequest.getURI(), stopwatch);
       }
     }
   }
@@ -579,18 +596,17 @@ public class HttpClientRemoteStorage
   /**
    * Appends repository configured additional query string to provided URL.
    *
-   * @param url        to append to
    * @param repository that may contain additional query string
+   * @param request the current request
+   * @param url the URL of the remote target to append to
    * @return URL with appended query string or original URL if repository does not have an configured query string
    * @throws RemoteStorageException if query string could not be appended (resulted in an Malformed URL exception)
    */
-  private URL appendQueryString(final URL url, final ProxyRepository repository)
+  private URL appendQueryString(final ProxyRepository repository, final ResourceStoreRequest request, final URL url)
       throws RemoteStorageException
   {
     final RemoteStorageContext ctx = getRemoteStorageContext(repository);
-
-    String queryString = queryStringBuilder.getQueryString(ctx, repository);
-
+    final String queryString = queryStringBuilder.getQueryString(ctx, repository);
     if (StringUtils.isNotBlank(queryString)) {
       try {
         if (StringUtils.isBlank(url.getQuery())) {
@@ -620,7 +636,7 @@ public class HttpClientRemoteStorage
         EntityUtils.consume(httpResponse.getEntity());
       }
       catch (IOException e) {
-        log.warn(e.getMessage());
+        log.warn("Failed to consume entity: " + e); // terse
       }
     }
   }

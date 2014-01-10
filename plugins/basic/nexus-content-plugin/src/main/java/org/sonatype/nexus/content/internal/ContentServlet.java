@@ -20,7 +20,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
+import java.util.Objects;
 
 import javax.inject.Inject;
 import javax.inject.Named;
@@ -30,6 +30,7 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.sonatype.nexus.configuration.application.NexusConfiguration;
 import org.sonatype.nexus.proxy.AccessDeniedException;
 import org.sonatype.nexus.proxy.IllegalOperationException;
 import org.sonatype.nexus.proxy.IllegalRequestException;
@@ -39,6 +40,7 @@ import org.sonatype.nexus.proxy.NoSuchRepositoryException;
 import org.sonatype.nexus.proxy.NoSuchResourceStoreException;
 import org.sonatype.nexus.proxy.RemoteStorageTransportOverloadedException;
 import org.sonatype.nexus.proxy.RepositoryNotAvailableException;
+import org.sonatype.nexus.proxy.RequestContext;
 import org.sonatype.nexus.proxy.ResourceStoreRequest;
 import org.sonatype.nexus.proxy.access.AccessManager;
 import org.sonatype.nexus.proxy.item.ContentLocator;
@@ -50,17 +52,17 @@ import org.sonatype.nexus.proxy.item.StorageLinkItem;
 import org.sonatype.nexus.proxy.router.RepositoryRouter;
 import org.sonatype.nexus.proxy.storage.UnsupportedStorageOperationException;
 import org.sonatype.nexus.util.SystemPropertiesHelper;
+import org.sonatype.nexus.web.BaseUrlHolder;
 import org.sonatype.nexus.web.Constants;
-import org.sonatype.nexus.web.ErrorPageFilter;
-import org.sonatype.nexus.web.ErrorStatusServletException;
+import org.sonatype.nexus.web.ErrorStatusException;
 import org.sonatype.nexus.web.RemoteIPFinder;
 import org.sonatype.nexus.web.WebUtils;
+import org.sonatype.nexus.web.internal.ErrorPageFilter;
 import org.sonatype.sisu.goodies.common.Throwables2;
 
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
 import org.apache.shiro.SecurityUtils;
 import org.apache.shiro.subject.Subject;
@@ -69,6 +71,18 @@ import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.io.ByteStreams.limit;
+import static javax.servlet.http.HttpServletResponse.SC_CREATED;
+import static javax.servlet.http.HttpServletResponse.SC_NO_CONTENT;
+import static javax.servlet.http.HttpServletResponse.SC_PARTIAL_CONTENT;
+import static javax.servlet.http.HttpServletResponse.SC_FOUND;
+import static javax.servlet.http.HttpServletResponse.SC_NOT_MODIFIED;
+import static javax.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
+import static javax.servlet.http.HttpServletResponse.SC_NOT_FOUND;
+import static javax.servlet.http.HttpServletResponse.SC_METHOD_NOT_ALLOWED;
+import static javax.servlet.http.HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE;
+import static javax.servlet.http.HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+import static javax.servlet.http.HttpServletResponse.SC_NOT_IMPLEMENTED;
+import static javax.servlet.http.HttpServletResponse.SC_SERVICE_UNAVAILABLE;
 
 /**
  * Provides access to repositories contents.
@@ -80,6 +94,34 @@ import static com.google.common.io.ByteStreams.limit;
 public class ContentServlet
     extends HttpServlet
 {
+  /**
+   * HTTP query parameter to mark request as "describe" request.
+   */
+  private static final String REQ_QP_DESCRIBE_PARAMETER = "describe";
+
+  /**
+   * HTTP query parameter to mark request as "describe" request.
+   */
+  private static final String REQ_QP_FORCE_PARAMETER = "force";
+
+  /**
+   * HTTP query parameter value for {@link #REQ_QP_FORCE_PARAMETER} to force local content. See {@link
+   * RequestContext#isRequestLocalOnly()}.
+   */
+  private static final String REQ_QP_FORCE_LOCAL_VALUE = "local";
+
+  /**
+   * HTTP query parameter value for {@link #REQ_QP_FORCE_PARAMETER} to force remote content. See {@link
+   * RequestContext#isRequestRemoteOnly()}.
+   */
+  private static final String REQ_QP_FORCE_REMOTE_VALUE = "remote";
+
+  /**
+   * HTTP query parameter value for {@link #REQ_QP_FORCE_PARAMETER} to force expiration of content. See {@link
+   * RequestContext#isRequestAsExpired()}.
+   */
+  private static final String REQ_QP_FORCE_EXPIRED_VALUE = "expired";
+
   /**
    * A flag setting what should be done if request path retrieval gets a {@link StorageLinkItem} here. If {@code true},
    * this servlet dereference the link (using {@link RepositoryRouter#dereferenceLink(StorageLinkItem)} method), and
@@ -101,6 +143,8 @@ public class ContentServlet
 
   private final Logger logger = LoggerFactory.getLogger(ContentServlet.class);
 
+  private final NexusConfiguration nexusConfiguration;
+
   private final RepositoryRouter repositoryRouter;
 
   private final ContentRenderer contentRenderer;
@@ -108,10 +152,12 @@ public class ContentServlet
   private final WebUtils webUtils;
 
   @Inject
-  public ContentServlet(final RepositoryRouter repositoryRouter,
+  public ContentServlet(final NexusConfiguration nexusConfiguration,
+                        final RepositoryRouter repositoryRouter,
                         final ContentRenderer contentRenderer,
                         final WebUtils webUtils)
   {
+    this.nexusConfiguration = checkNotNull(nexusConfiguration);
     this.repositoryRouter = checkNotNull(repositoryRouter);
     this.contentRenderer = checkNotNull(contentRenderer);
     this.webUtils = checkNotNull(webUtils);
@@ -129,11 +175,21 @@ public class ContentServlet
     final ResourceStoreRequest result = new ResourceStoreRequest(resourceStorePath);
     result.getRequestContext().put(STOPWATCH_KEY, new Stopwatch().start());
 
-    // honor the local only and remote only
-    final Map<String, String[]> parameterMap = request.getParameterMap();
+    // stuff in the user id if we have it in request
+    final Subject subject = SecurityUtils.getSubject();
+    if (subject != null && subject.getPrincipal() != null) {
+      result.getRequestContext().put(AccessManager.REQUEST_USER, subject.getPrincipal().toString());
+    }
+    result.getRequestContext().put(AccessManager.REQUEST_AGENT, request.getHeader("user-agent"));
+
+    // honor the localOnly, remoteOnly and asExpired (but remoteOnly and asExpired only for non-anon users)
+    // as those two actually makes Nexus perform a remote request
     result.setRequestLocalOnly(isLocal(request, resourceStorePath));
-    result.setRequestRemoteOnly(parameterMap.containsKey(Constants.REQ_QP_IS_REMOTE_PARAMETER));
-    result.setRequestAsExpired(parameterMap.containsKey(Constants.REQ_QP_AS_EXPIRED_PARAMETER));
+    if (!Objects.equals(nexusConfiguration.getAnonymousUsername(),
+        result.getRequestContext().get(AccessManager.REQUEST_USER))) {
+      result.setRequestRemoteOnly(REQ_QP_FORCE_REMOTE_VALUE.equals(request.getParameter(REQ_QP_FORCE_PARAMETER)));
+      result.setRequestAsExpired(REQ_QP_FORCE_EXPIRED_VALUE.equals(request.getParameter(REQ_QP_FORCE_PARAMETER)));
+    }
     result.setExternal(true);
 
     // honor if-modified-since
@@ -158,13 +214,6 @@ public class ContentServlet
     // stuff in the originating remote address
     result.getRequestContext().put(AccessManager.REQUEST_REMOTE_ADDRESS, RemoteIPFinder.findIP(request));
 
-    // stuff in the user id if we have it in request
-    final Subject subject = SecurityUtils.getSubject();
-    if (subject != null && subject.getPrincipal() != null) {
-      result.getRequestContext().put(AccessManager.REQUEST_USER, subject.getPrincipal().toString());
-    }
-    result.getRequestContext().put(AccessManager.REQUEST_AGENT, request.getHeader("user-agent"));
-
     // this is HTTPS, get the cert and stuff it too for later
     if (request.isSecure()) {
       result.getRequestContext().put(AccessManager.REQUEST_CONFIDENTIAL, Boolean.TRUE);
@@ -178,8 +227,11 @@ public class ContentServlet
     }
 
     // put the incoming URLs
-    result.setRequestAppRootUrl(webUtils.getAppRootUrl(request));
-    result.setRequestUrl(request.getRequestURL().toString());
+    final StringBuffer sb = request.getRequestURL();
+    if (request.getQueryString() != null) {
+      sb.append("?").append(request.getQueryString());
+    }
+    result.setRequestUrl(sb.toString());
     return result;
   }
 
@@ -189,7 +241,7 @@ public class ContentServlet
    */
   protected boolean isLocal(final HttpServletRequest request, final String resourceStorePath) {
     // check do we need local only access
-    boolean isLocal = request.getParameterMap().containsKey(Constants.REQ_QP_IS_LOCAL_PARAMETER);
+    boolean isLocal = REQ_QP_FORCE_LOCAL_VALUE.equals(request.getParameter(REQ_QP_FORCE_PARAMETER));
     if (!Strings.isNullOrEmpty(resourceStorePath)) {
       // overriding isLocal is we know it will be a collection
       isLocal = isLocal || resourceStorePath.endsWith(RepositoryItemUid.PATH_SEPARATOR);
@@ -198,56 +250,54 @@ public class ContentServlet
   }
 
   protected boolean isDescribeRequest(final HttpServletRequest request) {
-    return request.getParameterMap().containsKey(Constants.REQ_QP_IS_DESCRIBE_PARAMETER);
+    return request.getParameterMap().containsKey(REQ_QP_DESCRIBE_PARAMETER);
   }
 
   /**
-   * This method converts various exceptions into {@link ErrorStatusServletException} preparing those to be shown
+   * This method converts various exceptions into {@link ErrorStatusException} preparing those to be shown
    * by {@link ErrorPageFilter}. Still, there are some special case (see access denied handling and IO exception
    * handling) where only a request attribute is set, signaling for security filters that a challenge is needed to
    * elevate permissions.
    */
-  protected void handleException(final HttpServletRequest request,
-                                 final HttpServletResponse response,
-                                 final ResourceStoreRequest rsr, final Exception exception)
-      throws ErrorStatusServletException, IOException
+  private void handleException(final HttpServletRequest request, final Exception exception)
+      throws ErrorStatusException, IOException
   {
     logger.trace("Exception", exception);
-    int responseCode = 500;
+    int responseCode;
 
     if (exception instanceof LocalStorageEOFException) {
       // in case client drops connection, this makes not much sense, as he will not
       // receive this response, but we have to end it somehow.
       // but, in case when remote proxy peer drops connection on us regularly
       // this makes sense
-      responseCode = HttpServletResponse.SC_NOT_FOUND;
+      responseCode = SC_NOT_FOUND;
     }
     else if (exception instanceof IllegalArgumentException) {
-      responseCode = HttpServletResponse.SC_BAD_REQUEST;
+      responseCode = SC_BAD_REQUEST;
     }
     else if (exception instanceof RemoteStorageTransportOverloadedException) {
-      responseCode = HttpServletResponse.SC_SERVICE_UNAVAILABLE;
+      responseCode = SC_SERVICE_UNAVAILABLE;
     }
     else if (exception instanceof RepositoryNotAvailableException) {
-      responseCode = HttpServletResponse.SC_SERVICE_UNAVAILABLE;
+      responseCode = SC_SERVICE_UNAVAILABLE;
     }
     else if (exception instanceof IllegalRequestException) {
-      responseCode = HttpServletResponse.SC_BAD_REQUEST;
+      responseCode = SC_BAD_REQUEST;
     }
     else if (exception instanceof IllegalOperationException) {
-      responseCode = HttpServletResponse.SC_BAD_REQUEST;
+      responseCode = SC_BAD_REQUEST;
     }
     else if (exception instanceof UnsupportedStorageOperationException) {
-      responseCode = HttpServletResponse.SC_BAD_REQUEST;
+      responseCode = SC_BAD_REQUEST;
     }
     else if (exception instanceof NoSuchRepositoryException) {
-      responseCode = HttpServletResponse.SC_NOT_FOUND;
+      responseCode = SC_NOT_FOUND;
     }
     else if (exception instanceof NoSuchResourceStoreException) {
-      responseCode = HttpServletResponse.SC_NOT_FOUND;
+      responseCode = SC_NOT_FOUND;
     }
     else if (exception instanceof ItemNotFoundException) {
-      responseCode = HttpServletResponse.SC_NOT_FOUND;
+      responseCode = SC_NOT_FOUND;
     }
     else if (exception instanceof AccessDeniedException) {
       request.setAttribute(Constants.ATTR_KEY_REQUEST_IS_AUTHZ_REJECTED, Boolean.TRUE);
@@ -267,28 +317,56 @@ public class ContentServlet
       throw (IOException) exception;
     }
     else {
-      responseCode = HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+      responseCode = SC_INTERNAL_SERVER_ERROR;
       logger.warn(exception.getMessage(), exception);
     }
-    throw new ErrorStatusServletException(responseCode, null, exception.getMessage());
+
+    throw new ErrorStatusException(responseCode, null, exception.getMessage());
   }
 
   // service
 
   @Override
-  protected void service(final HttpServletRequest request, final HttpServletResponse response) throws ServletException,
-                                                                                                      IOException
+  protected void service(final HttpServletRequest request, final HttpServletResponse response)
+      throws ServletException, IOException
   {
     webUtils.equipResponseWithStandardHeaders(response);
     response.setHeader("Accept-Ranges", "bytes");
-    super.service(request, response);
+
+    final String method = request.getMethod();
+    switch (method) {
+      case "GET":
+      case "HEAD":
+        doGet(request, response);
+        break;
+
+      case "PUT":
+      case "POST":
+        doPut(request, response);
+        break;
+
+      case "DELETE":
+        doDelete(request, response);
+        break;
+
+      case "OPTIONS":
+        doOptions(request, response);
+        break;
+
+      case "TRACE":
+        doTrace(request, response);
+        break;
+
+      default:
+        throw new ErrorStatusException(SC_METHOD_NOT_ALLOWED, null, "Method not supported: " + method);
+    }
   }
 
   // GET
 
   @Override
-  protected void doGet(final HttpServletRequest request, final HttpServletResponse response) throws ServletException,
-                                                                                                    IOException
+  protected void doGet(final HttpServletRequest request, final HttpServletResponse response)
+      throws ServletException, IOException
   {
     final ResourceStoreRequest rsr = getResourceStoreRequest(request);
     try {
@@ -330,7 +408,7 @@ public class ContentServlet
       }
     }
     catch (Exception e) {
-      handleException(request, response, rsr, e);
+      handleException(request, e);
     }
   }
 
@@ -365,21 +443,22 @@ public class ContentServlet
   }
 
   /**
-   * Creates absolute URL (as String) of the passed link's target. To be used in "Location" header of the redirect
-   * message, for example.
+   * Creates absolute URL (as String) of the passed link's target.
+   *
+   * To be used in "Location" header of the redirect message, for example.
    */
   protected String getLinkTargetUrl(final StorageLinkItem link) {
     final RepositoryItemUid targetUid = link.getTarget();
-    // TODO: fix this chum
-    return link.getResourceStoreRequest().getRequestAppRootUrl() + "content/repositories/"
-        + targetUid.getRepository().getId() + targetUid.getPath();
+    return BaseUrlHolder.get() + "/content/repositories/" + targetUid.getRepository().getId() + targetUid.getPath();
   }
 
   /**
    * Handles a file response, all the conditional request cases, and eventually the content serving of the file item.
    */
-  protected void doGetFile(final HttpServletRequest request, final HttpServletResponse response,
-                           final StorageFileItem file) throws ServletException, IOException
+  protected void doGetFile(final HttpServletRequest request,
+                           final HttpServletResponse response,
+                           final StorageFileItem file)
+      throws ServletException, IOException
   {
     // ETag, in "shaved" form of {SHA1{e5c244520e897865709c730433f8b0c44ef271f1}} (without quotes)
     // or null if file does not have SHA1 (like Virtual) or generated items (as their SHA1 would correspond to template,
@@ -394,10 +473,8 @@ public class ContentServlet
     else {
       etag = null;
     }
-    // content-type
-    response.setHeader("Content-Type", file.getMimeType());
 
-    // last-modified
+    response.setHeader("Content-Type", file.getMimeType());
     response.setDateHeader("Last-Modified", file.getModified());
 
     // content-length, if known
@@ -413,12 +490,12 @@ public class ContentServlet
     if (!file.isContentGenerated() && file.getResourceStoreRequest().getIfModifiedSince() != 0
         && file.getModified() <= file.getResourceStoreRequest().getIfModifiedSince()) {
       // this is a conditional GET using time-stamp
-      response.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+      response.setStatus(SC_NOT_MODIFIED);
     }
     else if (!file.isContentGenerated() && file.getResourceStoreRequest().getIfNoneMatch() != null && etag != null
         && file.getResourceStoreRequest().getIfNoneMatch().equals(etag)) {
       // this is a conditional GET using ETag
-      response.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+      response.setStatus(SC_NOT_MODIFIED);
     }
     else {
       // NEXUS-5023 disable IE for sniffing into response content
@@ -435,19 +512,19 @@ public class ContentServlet
         }
       }
       else if (ranges.size() > 1) {
-        throw new ErrorStatusServletException(HttpServletResponse.SC_NOT_IMPLEMENTED, "Not Implemented",
+        throw new ErrorStatusException(SC_NOT_IMPLEMENTED, "Not Implemented",
             "Multiple ranges not yet supported.");
       }
       else {
         final Range<Long> range = ranges.get(0);
         if (!isRequestedRangeSatisfiable(file, range)) {
-          response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
+          response.setStatus(SC_REQUESTED_RANGE_NOT_SATISFIABLE);
           response.setHeader("Content-Length", "0");
           response.setHeader("Content-Range", "bytes */" + file.getLength());
           return;
         }
         final long bodySize = range.upperEndpoint() - range.lowerEndpoint();
-        response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);
+        response.setStatus(SC_PARTIAL_CONTENT);
         response.setHeader("Content-Length", String.valueOf(bodySize));
         response.setHeader("Content-Range",
             range.lowerEndpoint() + "-" + range.upperEndpoint() + "/" + file.getLength());
@@ -465,11 +542,13 @@ public class ContentServlet
    * Handles collection response, either redirects (to same URL but appended with slash, if request does not end with
    * slash), or renders the "index page" out of collection entries.
    */
-  protected void doGetCollection(final HttpServletRequest request, final HttpServletResponse response,
-                                 final StorageCollectionItem coll) throws Exception
+  protected void doGetCollection(final HttpServletRequest request,
+                                 final HttpServletResponse response,
+                                 final StorageCollectionItem coll)
+      throws Exception
   {
     if (!coll.getResourceStoreRequest().getRequestUrl().endsWith("/")) {
-      response.setStatus(HttpServletResponse.SC_FOUND);
+      response.setStatus(SC_FOUND);
       response.addHeader("Location", coll.getResourceStoreRequest().getRequestUrl() + "/");
       return;
     }
@@ -490,8 +569,11 @@ public class ContentServlet
   /**
    * Describe response, giving out meta-information about request, found item (if any) and so on.
    */
-  protected void doGetDescribe(final HttpServletRequest request, final HttpServletResponse response,
-                               final ResourceStoreRequest rsr, final StorageItem item, final Exception e)
+  protected void doGetDescribe(final HttpServletRequest request,
+                               final HttpServletResponse response,
+                               final ResourceStoreRequest rsr,
+                               final StorageItem item,
+                               final Exception e)
       throws IOException
   {
     // send no cache headers, as any of these responses should not be cached, ever
@@ -502,30 +584,19 @@ public class ContentServlet
   // PUT
 
   @Override
-  protected void doPut(final HttpServletRequest request, final HttpServletResponse response) throws ServletException,
-                                                                                                    IOException
+  protected void doPut(final HttpServletRequest request, final HttpServletResponse response)
+      throws ServletException, IOException
   {
     final ResourceStoreRequest rsr = getResourceStoreRequest(request);
     try {
-      final Map<String, String> userAttributes = getUserAttributesFromRequest(request);
-      repositoryRouter.storeItem(rsr, request.getInputStream(), userAttributes);
+      repositoryRouter.storeItem(rsr, request.getInputStream(), null);
       ((Stopwatch) rsr.getRequestContext().get(STOPWATCH_KEY)).stop();
-      response.setStatus(HttpServletResponse.SC_CREATED);
+      response.setStatus(SC_CREATED);
     }
     catch (Exception e) {
       ((Stopwatch) rsr.getRequestContext().get(STOPWATCH_KEY)).stop();
-      handleException(request, response, rsr, e);
+      handleException(request, e);
     }
-  }
-
-  /**
-   * Gathers "attribute" (probably set by client performing upload) from request, such might be query parameters, extra
-   * headers, or such.
-   */
-  protected Map<String, String> getUserAttributesFromRequest(final HttpServletRequest request) {
-    final Map<String, String> result = Maps.newHashMap();
-    // TODO: something like grab some query parameters?
-    return result;
   }
 
   // DELETE
@@ -537,12 +608,12 @@ public class ContentServlet
     final ResourceStoreRequest rsr = getResourceStoreRequest(request);
     try {
       repositoryRouter.deleteItem(rsr);
-      response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+      response.setStatus(SC_NO_CONTENT);
       ((Stopwatch) rsr.getRequestContext().get(STOPWATCH_KEY)).stop();
     }
     catch (Exception e) {
       ((Stopwatch) rsr.getRequestContext().get(STOPWATCH_KEY)).stop();
-      handleException(request, response, rsr, e);
+      handleException(request, e);
     }
   }
 
