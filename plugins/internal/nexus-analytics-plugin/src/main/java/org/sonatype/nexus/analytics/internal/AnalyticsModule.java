@@ -14,8 +14,7 @@ package org.sonatype.nexus.analytics.internal;
 
 import javax.inject.Named;
 
-import org.sonatype.nexus.web.MdcUserContextFilter;
-import org.sonatype.security.web.guice.SecurityWebFilter;
+import org.sonatype.nexus.web.internal.SecurityFilter;
 
 import com.google.inject.AbstractModule;
 import com.google.inject.servlet.ServletModule;
@@ -32,14 +31,11 @@ public class AnalyticsModule
   @Override
   protected void configure()
   {
-    bind(SecurityWebFilter.class);
-
     install(new ServletModule() {
       @Override
       protected void configureServlets() {
         // collection needs security filters applied first
-        filter("/*").through(SecurityWebFilter.class);
-        filter("/*").through(MdcUserContextFilter.class);
+        filter("/*").through(SecurityFilter.class);
 
         // then capture rest api requests
         filter("/service/local/*").through(RestRequestCollector.class);
