@@ -21,11 +21,11 @@ import java.util.Iterator;
  */
 public interface EventStore
 {
-  void add(EventData data);
+  void add(EventData data) throws Exception;
 
-  void clear();
+  void clear() throws Exception;
 
-  long size();
+  long size() throws Exception;
 
-  Iterator<EventData> iterator(int index);
+  Iterator<EventData> iterator(long index) throws Exception;
 }

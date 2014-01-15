@@ -64,6 +64,11 @@ public class EventRecorderImpl
     }
 
     log.debug("Record: {}", data);
-    store.add(data);
+    try {
+      store.add(data);
+    }
+    catch (Exception e) {
+      log.warn("Failed to record event data", e);
+    }
   }
 }
