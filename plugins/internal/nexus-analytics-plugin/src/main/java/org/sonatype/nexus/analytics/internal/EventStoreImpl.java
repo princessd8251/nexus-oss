@@ -52,24 +52,24 @@ public class EventStoreImpl
   }
 
   @Override
-  public void add(final EventData data) {
+  public void add(final EventData data) throws Exception {
     checkNotNull(data);
     storage.add(data);
   }
 
   @Override
-  public void clear() {
+  public void clear() throws Exception {
     storage.clear();
     log.debug("Cleared");
   }
 
   @Override
-  public long size() {
+  public long size() throws Exception {
     return storage.size();
   }
 
   @Override
-  public Iterator<EventData> iterator(final int index) {
-    return storage.listIterator(index);
+  public Iterator<EventData> iterator(final long index) throws Exception {
+    return storage.listIterator((int) index);
   }
 }
