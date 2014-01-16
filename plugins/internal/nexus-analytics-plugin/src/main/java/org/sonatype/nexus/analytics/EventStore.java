@@ -25,7 +25,7 @@ public interface EventStore
 
   void clear() throws Exception;
 
-  long size() throws Exception;
+  long approximateSize() throws Exception;
 
   Iterator<EventData> iterator(long index) throws Exception;
 }

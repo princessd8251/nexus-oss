@@ -91,7 +91,7 @@ public class CollectionCapability
       return messages.disabledDescription();
     }
 
-    return messages.description(store.size());
+    return messages.description(store.approximateSize());
   }
 
   @Override

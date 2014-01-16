@@ -12,6 +12,9 @@
  */
 package org.sonatype.nexus.analytics.internal;
 
+import io.kazuki.v0.store.easy.EasyJournalStoreModule;
+import io.kazuki.v0.store.lifecycle.LifecycleModule;
+
 import javax.inject.Named;
 
 import org.sonatype.nexus.web.internal.SecurityFilter;
@@ -21,16 +24,15 @@ import com.google.inject.servlet.ServletModule;
 
 /**
  * Analytics guice module.
- *
+ * 
  * @since 2.8
  */
 @Named
-public class AnalyticsModule
-  extends AbstractModule
-{
+public class AnalyticsModule extends AbstractModule {
   @Override
-  protected void configure()
-  {
+  protected void configure() {
+    install(new LifecycleModule());
+    install(new EasyJournalStoreModule("nexusanalytics", "org/sonatype/nexus/analytics/internal"));
     install(new ServletModule() {
       @Override
       protected void configureServlets() {

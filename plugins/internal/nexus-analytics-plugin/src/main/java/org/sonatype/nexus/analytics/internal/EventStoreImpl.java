@@ -12,19 +12,20 @@
  */
 package org.sonatype.nexus.analytics.internal;
 
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
+import static com.google.common.base.Preconditions.checkNotNull;
+import io.kazuki.v0.store.journal.JournalStore;
+import io.kazuki.v0.store.lifecycle.Lifecycle;
+import io.kazuki.v0.store.schema.TypeValidation;
 
+import java.util.Iterator;
+
+import javax.inject.Inject;
 import javax.inject.Named;
 import javax.inject.Singleton;
 
 import org.sonatype.nexus.analytics.EventData;
 import org.sonatype.nexus.analytics.EventStore;
 import org.sonatype.sisu.goodies.lifecycle.LifecycleSupport;
-
-import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * Default {@link EventStore} implementation.
@@ -37,39 +38,46 @@ public class EventStoreImpl
   extends LifecycleSupport
   implements EventStore
 {
-  // HACK: For now using in-memory just to move things forward
+  private final JournalStore store; 
+  private final Lifecycle lifecycle;
 
-  private final List<EventData> storage = Collections.synchronizedList(new LinkedList<EventData>());
-
+  @Inject
+  public EventStoreImpl(JournalStore store, Lifecycle lifecycle) {
+    this.store = store;
+    this.lifecycle = lifecycle;
+  }
+  
   @Override
   protected void doStart() throws Exception {
-    // nop
+    lifecycle.init();
+    lifecycle.start();
   }
 
   @Override
   protected void doStop() throws Exception {
-    // nop
+    lifecycle.shutdown();
+    lifecycle.stop();
   }
 
   @Override
   public void add(final EventData data) throws Exception {
     checkNotNull(data);
-    storage.add(data);
+    store.append("event_data", EventData.class, data, TypeValidation.STRICT);
   }
 
   @Override
   public void clear() throws Exception {
-    storage.clear();
+    store.clear(false, false);
     log.debug("Cleared");
   }
 
   @Override
-  public long size() throws Exception {
-    return storage.size();
+  public long approximateSize() throws Exception {
+    return store.approximateSize("event_data");
   }
 
   @Override
   public Iterator<EventData> iterator(final long index) throws Exception {
-    return storage.listIterator((int) index);
+    return store.getIteratorAbsolute("event_data", EventData.class, index, -1L);
   }
 }
