@@ -42,7 +42,7 @@ public class EventStoreImpl
   private final Lifecycle lifecycle;
 
   @Inject
-  public EventStoreImpl(JournalStore store, Lifecycle lifecycle) {
+  public EventStoreImpl(JournalStore store, @Named("nexusanalytics") Lifecycle lifecycle) {
     this.store = store;
     this.lifecycle = lifecycle;
   }
