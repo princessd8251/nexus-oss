@@ -12,7 +12,7 @@
  */
 package org.sonatype.nexus.analytics.internal;
 
-import io.kazuki.v0.store.easy.EasyJournalStoreModule;
+import io.kazuki.v0.store.easy.EasyPartitionedJournalStoreModule;
 import io.kazuki.v0.store.jdbi.JdbiDataSourceConfiguration;
 import io.kazuki.v0.store.keyvalue.KeyValueStoreConfiguration;
 import io.kazuki.v0.store.lifecycle.LifecycleModule;
@@ -35,13 +35,13 @@ public class AnalyticsModule extends AbstractModule {
   @Override
   protected void configure() {
     install(new LifecycleModule("nexusanalytics"));
-    
-    EasyJournalStoreModule journalModule = new EasyJournalStoreModule("nexusanalytics", null);
+
+    EasyPartitionedJournalStoreModule journalModule = new EasyPartitionedJournalStoreModule("nexusanalytics", null);
 
     journalModule.withJdbiConfig(getJdbiDataSourceConfiguration());
     journalModule.withSequenceConfig(getSequenceServiceConfiguration());
     journalModule.withKeyValueStoreConfig(getKeyValueStoreConfiguration());
-    
+
     install(journalModule);
 
     install(new ServletModule() {
@@ -59,7 +59,7 @@ public class AnalyticsModule extends AbstractModule {
       }
     });
   }
-  
+
   private JdbiDataSourceConfiguration getJdbiDataSourceConfiguration() {
     JdbiDataSourceConfiguration.Builder builder = new JdbiDataSourceConfiguration.Builder();
 
@@ -72,10 +72,10 @@ public class AnalyticsModule extends AbstractModule {
 
     return builder.build();
   }
-  
+
   private SequenceServiceConfiguration getSequenceServiceConfiguration() {
     SequenceServiceConfiguration.Builder builder = new SequenceServiceConfiguration.Builder();
-    
+
     builder.withDbType("h2");
     builder.withGroupName("nexus");
     builder.withStoreName("analytics");
@@ -83,14 +83,15 @@ public class AnalyticsModule extends AbstractModule {
 
     return builder.build();
   }
-  
+
   private KeyValueStoreConfiguration getKeyValueStoreConfiguration() {
     KeyValueStoreConfiguration.Builder builder = new KeyValueStoreConfiguration.Builder();
-    
+
     builder.withDbType("h2");
     builder.withGroupName("nexus");
     builder.withStoreName("analytics");
-    builder.withPartitionName("00000000");
+    builder.withPartitionName("default");
+    builder.withPartitionSize(1_000_000L);
     builder.withStrictTypeCreation(true);
 
     return builder.build();

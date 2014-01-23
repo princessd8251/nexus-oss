@@ -14,10 +14,15 @@ package org.sonatype.nexus.analytics.internal;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import io.kazuki.v0.store.journal.JournalStore;
+import io.kazuki.v0.store.journal.PartitionInfo;
+import io.kazuki.v0.store.journal.PartitionInfoSnapshot;
 import io.kazuki.v0.store.lifecycle.Lifecycle;
 import io.kazuki.v0.store.schema.TypeValidation;
 
+import java.io.PrintWriter;
 import java.util.Iterator;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import javax.inject.Inject;
 import javax.inject.Named;
@@ -26,6 +31,8 @@ import javax.inject.Singleton;
 import org.sonatype.nexus.analytics.EventData;
 import org.sonatype.nexus.analytics.EventStore;
 import org.sonatype.sisu.goodies.lifecycle.LifecycleSupport;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Default {@link EventStore} implementation.
@@ -40,6 +47,7 @@ public class EventStoreImpl
 {
   private final JournalStore store; 
   private final Lifecycle lifecycle;
+  private final ReentrantLock exportLock = new ReentrantLock();
 
   @Inject
   public EventStoreImpl(@Named("nexusanalytics") JournalStore store, @Named("nexusanalytics") Lifecycle lifecycle) {
@@ -78,6 +86,39 @@ public class EventStoreImpl
 
   @Override
   public Iterator<EventData> iterator(final long index) throws Exception {
-    return store.getIteratorAbsolute("event_data", EventData.class, index, -1L);
+    return store.getIteratorRelative("event_data", EventData.class, index, -1L);
+  }
+  
+  private void exportAllData(PrintWriter writer, ObjectMapper mapper) throws Exception {
+    try {
+      if (!exportLock.tryLock()) {
+        throw new IllegalStateException("Already locked for export");
+      }
+
+      store.closeActivePartition();
+  
+      Iterator<PartitionInfoSnapshot> partitions = store.getAllPartitions();
+      while (partitions.hasNext()) {
+        PartitionInfo partition = partitions.next();
+  
+        if (!partition.isClosed()) {
+          break;
+        }
+        
+        Iterator<EventData> events = store.getIteratorRelative("event_data", EventData.class, 0L, partition.getSize());
+
+        while (events.hasNext()) {
+          mapper.writeValue(writer, events.next());
+        }
+
+        writer.flush();
+
+        store.dropPartition(partition.getPartitionId());
+      }
+    } finally {
+      if (exportLock.isHeldByCurrentThread()) {
+        exportLock.unlock();
+      }
+    }
   }
 }
