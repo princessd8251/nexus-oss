@@ -13,15 +13,18 @@
 package org.sonatype.nexus.analytics.internal;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import io.kazuki.v0.internal.v2schema.Attribute;
+import io.kazuki.v0.internal.v2schema.Attribute.Type;
+import io.kazuki.v0.internal.v2schema.Schema;
 import io.kazuki.v0.store.journal.JournalStore;
 import io.kazuki.v0.store.journal.PartitionInfo;
 import io.kazuki.v0.store.journal.PartitionInfoSnapshot;
 import io.kazuki.v0.store.lifecycle.Lifecycle;
+import io.kazuki.v0.store.schema.SchemaStore;
 import io.kazuki.v0.store.schema.TypeValidation;
 
 import java.io.PrintWriter;
 import java.util.Iterator;
-import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 import javax.inject.Inject;
@@ -33,6 +36,7 @@ import org.sonatype.nexus.analytics.EventStore;
 import org.sonatype.sisu.goodies.lifecycle.LifecycleSupport;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
 
 /**
  * Default {@link EventStore} implementation.
@@ -46,12 +50,14 @@ public class EventStoreImpl
   implements EventStore
 {
   private final JournalStore store; 
+  private final SchemaStore schema;
   private final Lifecycle lifecycle;
   private final ReentrantLock exportLock = new ReentrantLock();
 
   @Inject
-  public EventStoreImpl(@Named("nexusanalytics") JournalStore store, @Named("nexusanalytics") Lifecycle lifecycle) {
+  public EventStoreImpl(@Named("nexusanalytics") JournalStore store, @Named("nexusanalytics") SchemaStore schema, @Named("nexusanalytics") Lifecycle lifecycle) {
     this.store = store;
+    this.schema = schema;
     this.lifecycle = lifecycle;
   }
   
@@ -59,6 +65,18 @@ public class EventStoreImpl
   protected void doStart() throws Exception {
     lifecycle.init();
     lifecycle.start();
+    
+    if (schema.retrieveSchema("event_data") == null) {
+      Schema eventSchema = new Schema(ImmutableList.of(
+          new Attribute("type", Type.UTF8_SMALLSTRING, null, false),
+          new Attribute("timestamp", Type.I64, null, true),
+          new Attribute("sequence", Type.I64, null, true),
+          new Attribute("userId", Type.UTF8_SMALLSTRING, null, true),
+          new Attribute("sessionId", Type.UTF8_SMALLSTRING, null, true),
+          new Attribute("attributes", Type.MAP, null, true)));
+      
+      schema.createSchema("event_data", eventSchema);
+    }
   }
 
   @Override
@@ -75,7 +93,7 @@ public class EventStoreImpl
 
   @Override
   public void clear() throws Exception {
-    store.clear(false, false);
+    store.clear(true, true);
     log.debug("Cleared");
   }
 
@@ -86,7 +104,7 @@ public class EventStoreImpl
 
   @Override
   public Iterator<EventData> iterator(final long index) throws Exception {
-    return store.getIteratorRelative("event_data", EventData.class, index, -1L);
+    return store.getIteratorRelative("event_data", EventData.class, index, null);
   }
   
   private void exportAllData(PrintWriter writer, ObjectMapper mapper) throws Exception {
